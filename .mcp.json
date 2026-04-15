@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "gsd-workflow": {
+      "command": "/root/.nvm/versions/node/v22.22.2/bin/node",
+      "args": [
+        "/root/.local/share/pnpm/global/5/.pnpm/gsd-pi@2.74.0_ws@8.20.0_zod@4.3.6/node_modules/gsd-pi/packages/mcp-server/dist/cli.js"
+      ],
+      "cwd": "/home/mxt/IImage",
+      "env": {
+        "GSD_CLI_PATH": "/root/.local/share/pnpm/global/5/.pnpm/gsd-pi@2.74.0_ws@8.20.0_zod@4.3.6/node_modules/gsd-pi/dist/loader.js",
+        "GSD_WORKFLOW_EXECUTORS_MODULE": "/root/.gsd/agent/extensions/gsd/tools/workflow-tool-executors.js",
+        "GSD_WORKFLOW_WRITE_GATE_MODULE": "/root/.gsd/agent/extensions/gsd/bootstrap/write-gate.js",
+        "GSD_PERSIST_WRITE_GATE_STATE": "1",
+        "GSD_WORKFLOW_PROJECT_ROOT": "/home/mxt/IImage"
+      }
+    }
+  }
+}

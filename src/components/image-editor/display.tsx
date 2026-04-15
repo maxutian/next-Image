@@ -65,7 +65,7 @@ export function Display({ pending, state, history }: DisplayProps) {
               </div>
               <p className="text-sm font-medium">等待第一次生成</p>
               <p className="max-w-sm text-sm text-muted-foreground">
-                Server Action、Gemini SDK、图片上传与结果区域都已经连通，补充密钥后即可开始试跑。
+                Route Handler、Gemini SDK、图片上传与结果区域都已经连通，补充密钥后即可开始试跑。
               </p>
             </div>
           )}
