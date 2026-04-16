@@ -3,6 +3,12 @@ import { AuthForm } from "@/components/auth/auth-form";
 import { isSupabaseConfigured, getSupabaseMissingEnvMessage } from "@/lib/supabase/env";
 import { loadSessionWithMessages } from "@/lib/chat/turn";
 
+type HomePageProps = {
+  searchParams?: Promise<{
+    session?: string | string[];
+  }>;
+};
+
 function SupabaseSetupNotice() {
   return (
     <main className="flex min-h-screen items-center justify-center px-4 py-8">
@@ -23,14 +29,19 @@ function SupabaseSetupNotice() {
   );
 }
 
-export default async function Home() {
+export default async function Home({ searchParams }: HomePageProps) {
   if (!isSupabaseConfigured()) {
     return <SupabaseSetupNotice />;
   }
 
+  const resolvedSearchParams = searchParams ? await searchParams : undefined;
+  const requestedSessionId = Array.isArray(resolvedSearchParams?.session)
+    ? resolvedSearchParams?.session[0]
+    : resolvedSearchParams?.session;
+
   let initialState;
   try {
-    initialState = await loadSessionWithMessages();
+    initialState = await loadSessionWithMessages(requestedSessionId);
   } catch (error) {
     if (error instanceof Error && error.message === "未登录") {
       return <AuthForm />;

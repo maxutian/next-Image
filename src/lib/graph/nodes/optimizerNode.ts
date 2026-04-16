@@ -17,6 +17,7 @@ export async function optimizerNode(state: AgentState) {
       intent: state.intent,
       mode: state.mode,
       hasSourceImage: Boolean(state.sourceImage),
+      sessionContext: state.sessionContext,
     });
 
     return {

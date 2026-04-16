@@ -10,6 +10,7 @@ export async function analyzerNode(state: AgentState) {
       prompt: state.originalPrompt,
       requestedMode: state.requestedMode,
       hasSourceImage: Boolean(state.sourceImage),
+      sessionContext: state.sessionContext,
     });
 
     return {

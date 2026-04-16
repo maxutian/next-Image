@@ -22,6 +22,8 @@ export type ChatMessage = {
 export type ChatTurnState = {
   status: "idle" | "pending" | "success" | "error";
   sessionId: string;
+  currentSession?: ChatSession | null;
+  sessions: ChatSession[];
   messages: ChatMessage[];
   activeImage?: HistoryItem | null;
   activeImages?: HistoryItem[];

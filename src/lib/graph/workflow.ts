@@ -13,6 +13,7 @@ function routeAfterAnalyze(state: typeof agentState.State) {
 }
 
 function routeAfterReview(state: typeof agentState.State) {
+  // review 通过才落库；失败时允许在限定次数内回到 optimizer 重新组织 prompt。
   if (state.reviewStatus === "passed") {
     return "save";
   }

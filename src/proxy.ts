@@ -33,6 +33,7 @@ export async function proxy(request: NextRequest) {
     },
   });
 
+  // 这一步的目的不是读取业务数据，而是让 Supabase 在每次请求上有机会刷新认证 cookie。
   await supabase.auth.getUser();
 
   return response;

@@ -1,20 +1,78 @@
 import "server-only";
 
-import { GoogleGenAI, type Part } from "@google/genai";
 import type { GenerationIntent } from "@/lib/graph/state";
 import type { EditorMode } from "@/types";
 
-const DEFAULT_IMAGE_MODEL =
-  process.env.GEMINI_IMAGE_MODEL || "gemini-2.5-flash-image";
+// 这里保留 gemini.ts 这个文件名，是为了避免影响上层调用方；
+// 当前实际 provider 已经统一切换为 OpenRouter。
+const DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 const DEFAULT_TEXT_MODEL =
-  process.env.GEMINI_TEXT_MODEL || "gemini-1.5-flash";
+  process.env.OPENROUTER_TEXT_MODEL ||
+  process.env.GEMINI_TEXT_MODEL ||
+  "moonshotai/kimi-k2";
+const DEFAULT_IMAGE_MODEL =
+  process.env.OPENROUTER_IMAGE_MODEL ||
+  process.env.GEMINI_IMAGE_MODEL ||
+  "black-forest-labs/flux.2-klein-4b";
 const DEFAULT_EMBEDDING_MODEL =
-  process.env.GEMINI_EMBEDDING_MODEL || "text-embedding-004";
-const DEFAULT_EMBEDDING_DIMENSION = 768;
+  process.env.OPENROUTER_EMBEDDING_MODEL ||
+  process.env.GEMINI_EMBEDDING_MODEL ||
+  "qwen/qwen3-embedding-4b";
+const DEFAULT_EMBEDDING_DIMENSION = Number.parseInt(
+  process.env.OPENROUTER_EMBEDDING_DIMENSIONS ||
+    process.env.GEMINI_EMBEDDING_DIMENSIONS ||
+    "768",
+  10,
+);
 
 type InlineData = {
   data: string;
   mimeType?: string;
+};
+
+type OpenRouterChatMessage = {
+  role: "user" | "assistant" | "system";
+  content?:
+    | string
+    | Array<
+        | {
+            type: "text";
+            text: string;
+          }
+        | {
+            type: "image_url";
+            image_url: {
+              url: string;
+            };
+          }
+      >
+    | null;
+  images?: Array<{
+    type?: string;
+    image_url?: {
+      url?: string;
+    };
+  }>;
+  refusal?: string | null;
+  reasoning?: string | null;
+};
+
+type OpenRouterChatCompletionResponse = {
+  choices?: Array<{
+    message?: OpenRouterChatMessage;
+  }>;
+  error?: {
+    message?: string;
+  };
+};
+
+type OpenRouterEmbeddingsResponse = {
+  data?: Array<{
+    embedding?: number[];
+  }>;
+  error?: {
+    message?: string;
+  };
 };
 
 function getOptionalEnv(name: string) {
@@ -22,122 +80,178 @@ function getOptionalEnv(name: string) {
   return value ? value : undefined;
 }
 
+function getOpenRouterBaseUrl() {
+  return getOptionalEnv("OPENROUTER_BASE_URL") || DEFAULT_OPENROUTER_BASE_URL;
+}
+
 function getRequiredApiKey() {
-  const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+  const apiKey =
+    process.env.OPENROUTER_API_KEY ||
+    process.env.GEMINI_API_KEY ||
+    process.env.GOOGLE_API_KEY;
 
   if (!apiKey) {
-    throw new Error("Missing GEMINI_API_KEY. Add it to .env.local before generating images.");
+    throw new Error("Missing OPENROUTER_API_KEY. Add it to .env.local before generating images.");
   }
 
   return apiKey;
 }
 
-let geminiClient: GoogleGenAI | undefined;
+function getRequestHeaders() {
+  const headers = new Headers({
+    Authorization: `Bearer ${getRequiredApiKey()}`,
+    "Content-Type": "application/json",
+  });
 
-function getGeminiClient() {
-  if (!geminiClient) {
-    const apiVersion = getOptionalEnv("GEMINI_API_VERSION");
-    const baseUrl = getOptionalEnv("GEMINI_BASE_URL");
+  const siteUrl = getOptionalEnv("NEXT_PUBLIC_SITE_URL");
+  const appName = getOptionalEnv("OPENROUTER_APP_NAME") || "IImage";
 
-    geminiClient = new GoogleGenAI({
-      apiKey: getRequiredApiKey(),
-      ...(apiVersion ? { apiVersion } : {}),
-      ...(baseUrl
-        ? {
-            httpOptions: {
-              baseUrl,
-            },
-          }
-        : {}),
-    });
+  if (siteUrl) {
+    headers.set("HTTP-Referer", siteUrl);
   }
 
-  return geminiClient;
+  headers.set("X-Title", appName);
+
+  return headers;
 }
 
-function extractInlineData(parts: Part[] | undefined) {
-  for (const part of parts || []) {
-    if (part.inlineData?.data) {
-      return {
-        data: part.inlineData.data,
-        mimeType: part.inlineData.mimeType || "image/png",
-      };
+async function openRouterRequest<T>(path: string, payload: Record<string, unknown>) {
+  // 文本分析、图片生成、embedding 都复用这一个请求封装，保证 header、报错格式和鉴权一致。
+  const response = await fetch(`${getOpenRouterBaseUrl()}${path}`, {
+    method: "POST",
+    headers: getRequestHeaders(),
+    body: JSON.stringify(payload),
+  });
+
+  const rawText = await response.text();
+  let parsed: T | null = null;
+
+  if (rawText) {
+    try {
+      parsed = JSON.parse(rawText) as T;
+    } catch {
+      parsed = null;
     }
   }
 
-  return null;
-}
+  if (!response.ok) {
+    const message =
+      (parsed as { error?: { message?: string } } | null)?.error?.message ||
+      rawText ||
+      `OpenRouter request failed with status ${response.status}`;
 
-function extractText(parts: Part[] | undefined) {
-  for (const part of parts || []) {
-    if (typeof part.text === "string" && part.text.trim()) {
-      return part.text.trim();
-    }
+    throw new Error(message);
   }
 
-  return "";
+  if (!parsed) {
+    throw new Error("OpenRouter returned an empty response.");
+  }
+
+  return parsed;
 }
 
 function stripCodeFence(text: string) {
   return text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
 }
 
+function extractChatText(message: OpenRouterChatMessage | undefined) {
+  if (!message?.content) {
+    return "";
+  }
+
+  if (typeof message.content === "string") {
+    return message.content.trim();
+  }
+
+  return message.content
+    .map((part) => ("text" in part ? part.text : ""))
+    .join("\n")
+    .trim();
+}
+
+function extractImageFromMessage(message: OpenRouterChatMessage | undefined) {
+  // OpenRouter 图片模型返回的是 data URL，这里统一拆成业务层需要的 { mimeType, data } 结构。
+  const dataUrl = message?.images?.[0]?.image_url?.url;
+
+  if (!dataUrl?.startsWith("data:")) {
+    return null;
+  }
+
+  const match = /^data:(.+?);base64,(.+)$/i.exec(dataUrl);
+  if (!match) {
+    return null;
+  }
+
+  return {
+    mimeType: match[1] || "image/png",
+    data: match[2],
+  };
+}
+
+function extractJsonText(text: string) {
+  const normalized = stripCodeFence(text);
+
+  try {
+    JSON.parse(normalized);
+    return normalized;
+  } catch {
+    const firstBrace = normalized.indexOf("{");
+    const lastBrace = normalized.lastIndexOf("}");
+
+    if (firstBrace >= 0 && lastBrace > firstBrace) {
+      return normalized.slice(firstBrace, lastBrace + 1);
+    }
+
+    return normalized;
+  }
+}
+
+function buildTextMessages(prompt: string) {
+  return [
+    {
+      role: "user" as const,
+      content: prompt,
+    },
+  ];
+}
+
 export async function analyzeImageRequest({
   prompt,
   requestedMode,
   hasSourceImage,
+  sessionContext,
 }: {
   prompt: string;
   requestedMode: EditorMode;
   hasSourceImage: boolean;
+  sessionContext?: string;
 }) {
-  const ai = getGeminiClient();
-  const response = await ai.models.generateContent({
-    model: DEFAULT_TEXT_MODEL,
-    contents: [
-      {
-        role: "user",
-        parts: [
-          {
-            text: [
-              "Classify the user's image generation request.",
-              "Return strict JSON with keys: intent, mode, shouldOptimizePrompt.",
-              "intent must be one of: create_new, edit_existing, enhance_prompt.",
-              "mode must be one of: text-to-image, image-to-image.",
-              `requestedMode: ${requestedMode}`,
-              `hasSourceImage: ${hasSourceImage}`,
-              `prompt: ${prompt}`,
-            ].join("\n"),
-          },
-        ],
-      },
-    ],
-    config: {
+  const response = await openRouterRequest<OpenRouterChatCompletionResponse>(
+    "/chat/completions",
+    {
+      model: DEFAULT_TEXT_MODEL,
+      messages: buildTextMessages(
+        [
+          "Classify the user's image generation request.",
+          "Return strict JSON with keys: intent, mode, shouldOptimizePrompt.",
+          "intent must be one of: create_new, edit_existing, enhance_prompt.",
+          "mode must be one of: text-to-image, image-to-image.",
+          `requestedMode: ${requestedMode}`,
+          `hasSourceImage: ${hasSourceImage}`,
+          sessionContext
+            ? `recentSessionContext:\n${sessionContext}`
+            : "recentSessionContext: none",
+          `prompt: ${prompt}`,
+        ].join("\n"),
+      ),
       temperature: 0,
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: "OBJECT",
-        required: ["intent", "mode", "shouldOptimizePrompt"],
-        properties: {
-          intent: {
-            type: "STRING",
-            enum: ["create_new", "edit_existing", "enhance_prompt"],
-          },
-          mode: {
-            type: "STRING",
-            enum: ["text-to-image", "image-to-image"],
-          },
-          shouldOptimizePrompt: {
-            type: "BOOLEAN",
-          },
-        },
-      },
+      max_tokens: 200,
     },
-  });
+  );
 
   const fallbackMode = hasSourceImage ? "image-to-image" : requestedMode;
   const fallbackIntent = hasSourceImage ? "edit_existing" : "create_new";
-  const rawText = response.text ? stripCodeFence(response.text) : "";
+  const rawText = extractChatText(response.choices?.[0]?.message);
 
   if (!rawText) {
     return {
@@ -148,7 +262,7 @@ export async function analyzeImageRequest({
   }
 
   try {
-    const parsed = JSON.parse(rawText) as {
+    const parsed = JSON.parse(extractJsonText(rawText)) as {
       intent?: GenerationIntent;
       mode?: EditorMode;
       shouldOptimizePrompt?: boolean;
@@ -173,41 +287,40 @@ export async function optimizeImagePrompt({
   intent,
   mode,
   hasSourceImage,
+  sessionContext,
 }: {
   prompt: string;
   intent: GenerationIntent;
   mode: EditorMode;
   hasSourceImage: boolean;
+  sessionContext?: string;
 }) {
-  const ai = getGeminiClient();
-  const response = await ai.models.generateContent({
-    model: DEFAULT_TEXT_MODEL,
-    contents: [
-      {
-        role: "user",
-        parts: [
-          {
-            text: [
-              "Rewrite the user's request into a production-quality English image prompt.",
-              "Keep the visual intent, subject, style, camera, lighting, composition, material, and background details explicit.",
-              "If the request is image editing, preserve the existing subject identity and only apply the requested edits.",
-              "Do not add safety disclaimers or markdown.",
-              `intent: ${intent}`,
-              `mode: ${mode}`,
-              `hasSourceImage: ${hasSourceImage}`,
-              `userPrompt: ${prompt}`,
-            ].join("\n"),
-          },
-        ],
-      },
-    ],
-    config: {
+  const response = await openRouterRequest<OpenRouterChatCompletionResponse>(
+    "/chat/completions",
+    {
+      model: DEFAULT_TEXT_MODEL,
+      messages: buildTextMessages(
+        [
+          "Rewrite the user's request into a production-quality English image prompt.",
+          "Keep the visual intent, subject, style, camera, lighting, composition, material, and background details explicit.",
+          "If the request is image editing, preserve the existing subject identity and only apply the requested edits.",
+          "When recent session context is relevant, preserve continuity with the existing scene, subject identity, and visual attributes.",
+          "Do not add safety disclaimers or markdown.",
+          `intent: ${intent}`,
+          `mode: ${mode}`,
+          `hasSourceImage: ${hasSourceImage}`,
+          sessionContext
+            ? `recentSessionContext:\n${sessionContext}`
+            : "recentSessionContext: none",
+          `userPrompt: ${prompt}`,
+        ].join("\n"),
+      ),
       temperature: 0.4,
-      maxOutputTokens: 300,
+      max_tokens: 300,
     },
-  });
+  );
 
-  return (response.text || prompt).trim();
+  return extractChatText(response.choices?.[0]?.message) || prompt;
 }
 
 export async function generateImageWithGemini({
@@ -217,31 +330,39 @@ export async function generateImageWithGemini({
   prompt: string;
   sourceImage?: InlineData | null;
 }) {
-  const ai = getGeminiClient();
-  const parts: Part[] = [{ text: prompt }];
+  const content = sourceImage
+    ? [
+        {
+          type: "text" as const,
+          text: prompt,
+        },
+        {
+          type: "image_url" as const,
+          image_url: {
+            url: `data:${sourceImage.mimeType || "image/png"};base64,${sourceImage.data}`,
+          },
+        },
+      ]
+    : prompt;
 
-  if (sourceImage) {
-    parts.unshift({
-      inlineData: {
-        data: sourceImage.data,
-        mimeType: sourceImage.mimeType || "image/png",
-      },
-    });
-  }
-
-  const response = await ai.models.generateContent({
-    model: DEFAULT_IMAGE_MODEL,
-    contents: [{ role: "user", parts }],
-    config: {
-      responseModalities: ["TEXT", "IMAGE"],
+  const response = await openRouterRequest<OpenRouterChatCompletionResponse>(
+    "/chat/completions",
+    {
+      model: DEFAULT_IMAGE_MODEL,
+      modalities: ["image"],
+      messages: [
+        {
+          role: "user",
+          content,
+        },
+      ],
+      max_tokens: 200,
     },
-  });
-
-  const partsFromResponse = response.candidates?.flatMap(
-    (candidate) => candidate.content?.parts || [],
   );
-  const image = extractInlineData(partsFromResponse);
-  const text = extractText(partsFromResponse);
+
+  const message = response.choices?.[0]?.message;
+  const image = extractImageFromMessage(message);
+  const text = extractChatText(message);
 
   return {
     image,
@@ -250,14 +371,23 @@ export async function generateImageWithGemini({
 }
 
 export async function generatePromptEmbedding(prompt: string) {
-  const ai = getGeminiClient();
-  const response = await ai.models.embedContent({
-    model: DEFAULT_EMBEDDING_MODEL,
-    contents: [prompt],
-    config: {
-      outputDimensionality: DEFAULT_EMBEDDING_DIMENSION,
+  const response = await openRouterRequest<OpenRouterEmbeddingsResponse>(
+    "/embeddings",
+    {
+      model: DEFAULT_EMBEDDING_MODEL,
+      input: prompt,
+      dimensions: DEFAULT_EMBEDDING_DIMENSION,
     },
-  });
+  );
 
-  return response.embeddings?.[0]?.values || null;
+  const embedding = response.data?.[0]?.embedding || null;
+
+  // 数据库列固定是 vector(768)，这里提前兜底，避免把错误维度写入 Postgres。
+  if (embedding && embedding.length !== DEFAULT_EMBEDDING_DIMENSION) {
+    throw new Error(
+      `Embedding dimension mismatch: expected ${DEFAULT_EMBEDDING_DIMENSION}, got ${embedding.length}.`,
+    );
+  }
+
+  return embedding;
 }

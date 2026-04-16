@@ -66,6 +66,7 @@ export async function supabaseSaveNode(state: AgentState) {
   let embeddingVector: string | null = null;
 
   try {
+    // embedding 是增强检索能力的附加信息，不应该因为它失败而阻塞整张图保存。
     const embedding = await generatePromptEmbedding(
       state.optimizedPrompt || state.originalPrompt,
     );
@@ -75,6 +76,7 @@ export async function supabaseSaveNode(state: AgentState) {
   }
 
   const persistedPrompt = state.optimizedPrompt || state.originalPrompt;
+  // 这里先保存“图片主记录”；会话消息和 message_images 关系由 chat 层在工作流返回后补齐。
   const { data: insertedRow, error: insertError } = await supabase
     .from("images")
     .insert({
